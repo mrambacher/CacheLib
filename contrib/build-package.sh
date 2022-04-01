@@ -38,7 +38,7 @@ show_help_and_exit()
   base=$(basename "$0")
   echo "CacheLib dependencies builder
 
-usage: $base [-BdhijStv] NAME
+usage: $base [-BdhijmStv] NAME
 
 options:
   -B    skip build step
@@ -46,6 +46,7 @@ options:
   -d    build with DEBUG configuration
         (default is RELEASE with debug information)
   -h    This help screen
+  -m    Build with compiler flags
   -i    install after build using 'sudo make install'
         (default is to build but not install)
   -j    build using all available CPUs ('make -j')
@@ -78,7 +79,9 @@ build_tests=
 show_help=
 many_jobs=
 verbose=
-while getopts :BSdhijtv param
+compiler_flags=
+
+while getopts :BSdhijmtv param
 do
   case $param in
     i) install=yes ;;
@@ -88,6 +91,7 @@ do
     d) debug_build=yes ;;
     v) verbose=yes ;;
     j) many_jobs=yes ;;
+    m) compiler_flags=yes ;;
     t) build_tests=yes ;;
     ?) die "unknown option. See -h for help."
   esac
@@ -159,6 +163,7 @@ case "$1" in
     REPODIR=cachelib/external/$NAME
     SRCDIR=$REPODIR
     external_git_clone=yes
+    external_git_tags="8.0.1"
     cmake_custom_params="-DBUILD_SHARED_LIBS=ON"
     if test "$build_tests" = "yes" ; then
         cmake_custom_params="$cmake_custom_params -DFMT_TEST=YES"
@@ -342,7 +347,11 @@ cd "build-$NAME" || die "'cd' failed"
 ##
 if test "$build" ; then
   # shellcheck disable=SC2086
-  cmake $CMAKE_PARAMS "../$SRCDIR" || die "cmake failed on $SRCDIR"
+  if test "$compiler_flags" ; then
+    cmake $CMAKE_PARAMS -DCMAKE_CXX_FLAGS="-mavx2 -mfma -mavx -mf16c" "../$SRCDIR" || die "cmake failed on $SRCDIR"
+  else
+    cmake $CMAKE_PARAMS "../$SRCDIR" || die "cmake failed on $SRCDIR"
+  fi
   # shellcheck disable=SC2086
   nice make $MAKE_PARAMS || die "make failed"
 fi
