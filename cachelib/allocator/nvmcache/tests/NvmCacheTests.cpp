@@ -403,6 +403,7 @@ TEST_F(NvmCacheTest, NvmClean) {
     ASSERT_NE(nullptr, it);
     cache_->insertOrReplace(it);
   }
+  nvm.flushNvmCache();
 
   auto nEvictions = this->evictionCount() - evictBefore;
   auto nPuts = this->getStats().numNvmPuts - putsBefore;
@@ -1056,7 +1057,7 @@ TEST_F(NvmCacheTest, ChainedItemsModifyAccessible) {
           << item.toString();
     };
 
-    auto verifyChainedAllcos = [&](const ItemHandle& hdl, uint32_t nChained) {
+    auto verifyChainedAllcos = [&](const ReadHandle& hdl, uint32_t nChained) {
       auto allocs = cache.viewAsChainedAllocs(hdl);
       verifyItem(allocs.getParentItem(), vals[0]);
 
@@ -1984,7 +1985,7 @@ TEST_F(NvmCacheTest, testEvictCB) {
     ASSERT_NE(nullptr, handle.get());
     std::memcpy(handle->getMemory(), val.data(), val.size());
     auto buf = toIOBuf(makeNvmItem(handle));
-    evictCB(navy::makeView(key.data()),
+    evictCB(HashedKey{key.data()},
             navy::BufferView(buf.length(), buf.data()),
             navy::DestructorEvent::Recycled);
     ASSERT_TRUE(destructorCalled);
@@ -2005,7 +2006,7 @@ TEST_F(NvmCacheTest, testEvictCB) {
     std::memcpy(handle->getMemory(), val.data(), val.size());
     cache.insertOrReplace(handle);
     auto buf = toIOBuf(makeNvmItem(handle));
-    evictCB(navy::makeView(key.data()),
+    evictCB(HashedKey{key.data()},
             navy::BufferView(buf.length(), buf.data()),
             navy::DestructorEvent::Recycled);
     ASSERT_TRUE(destructorCalled);
@@ -2024,7 +2025,7 @@ TEST_F(NvmCacheTest, testEvictCB) {
     cache.insertOrReplace(handle);
     handle->markNvmClean();
     auto buf = toIOBuf(makeNvmItem(handle));
-    evictCB(navy::makeView(key.data()),
+    evictCB(HashedKey{key.data()},
             navy::BufferView(buf.length(), buf.data()),
             navy::DestructorEvent::Recycled);
     // Recycled event, in RAM and clean
@@ -2040,7 +2041,7 @@ TEST_F(NvmCacheTest, testEvictCB) {
     ASSERT_NE(nullptr, handle.get());
     std::memcpy(handle->getMemory(), val.data(), val.size());
     auto buf = toIOBuf(makeNvmItem(handle));
-    evictCB(navy::makeView(key.data()),
+    evictCB(HashedKey{key.data()},
             navy::BufferView(buf.length(), buf.data()),
             navy::DestructorEvent::Removed);
     // Removed event, not in RAM
@@ -2059,7 +2060,7 @@ TEST_F(NvmCacheTest, testEvictCB) {
     std::memcpy(handle->getMemory(), val.data(), val.size());
     cache.insertOrReplace(handle);
     auto buf = toIOBuf(makeNvmItem(handle));
-    evictCB(navy::makeView(key.data()),
+    evictCB(HashedKey{key.data()},
             navy::BufferView(buf.length(), buf.data()),
             navy::DestructorEvent::Removed);
     // Removed event, in RAM but unclean
@@ -2078,7 +2079,7 @@ TEST_F(NvmCacheTest, testEvictCB) {
     cache.insertOrReplace(handle);
     handle->markNvmClean();
     auto buf = toIOBuf(makeNvmItem(handle));
-    evictCB(navy::makeView(key.data()),
+    evictCB(HashedKey{key.data()},
             navy::BufferView(buf.length(), buf.data()),
             navy::DestructorEvent::Removed);
     // Removed event, in RAM and clean
@@ -2438,6 +2439,61 @@ TEST_F(NvmCacheTest, testFindToWriteNvmInvalidation) {
   ASSERT_FALSE(handle->isNvmClean());
 }
 
+TEST_F(NvmCacheTest, IsNewCacheInstanceStat) {
+  // A new instane of cache should have this stat set to true
+  // A cache that is recovered successfully should set it to false
+
+  auto stats = getStats();
+  EXPECT_TRUE(stats.isNewRamCache);
+  EXPECT_TRUE(stats.isNewNvmCache);
+  // The sleep calls in this test is to make sure the time
+  // has moved forward by a second or two so the cache uptime
+  // checks we rely on for determining new/warm cache is valid.
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  // Use SHM. This is also a new cache instance
+  this->convertToShmCache();
+  stats = getStats();
+  EXPECT_TRUE(stats.isNewRamCache);
+  EXPECT_TRUE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  warmRoll();
+  stats = getStats();
+  EXPECT_FALSE(stats.isNewRamCache);
+  EXPECT_FALSE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  coldRoll();
+  stats = getStats();
+  EXPECT_TRUE(stats.isNewRamCache);
+  EXPECT_FALSE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  warmRoll();
+  stats = getStats();
+  EXPECT_FALSE(stats.isNewRamCache);
+  EXPECT_FALSE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  iceRoll();
+  stats = getStats();
+  EXPECT_FALSE(stats.isNewRamCache);
+  EXPECT_TRUE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  warmRoll();
+  stats = getStats();
+  EXPECT_FALSE(stats.isNewRamCache);
+  EXPECT_FALSE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+
+  iceColdRoll();
+  stats = getStats();
+  EXPECT_TRUE(stats.isNewRamCache);
+  EXPECT_TRUE(stats.isNewNvmCache);
+  std::this_thread::sleep_for(std::chrono::seconds{2});
+}
 } // namespace tests
 } // namespace cachelib
 } // namespace facebook

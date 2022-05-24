@@ -229,9 +229,8 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
                                           test_util::getRandomAsciiStr(256),
                                           sizes1[0]),
                  std::invalid_argument);
-    ASSERT_THROW(
-        util::allocateAccessible(alloc, poolId1, {nullptr, 10}, sizes1[0]),
-        std::invalid_argument);
+    // Note: we don't test for a null stringpiece with positive size as the key
+    //       because folly::StringPiece now throws an exception for it
 
     // allocate until we evict the key.
     this->fillUpPoolUntilEvictions(alloc, poolId2, sizes2, keyLen);
@@ -745,6 +744,17 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       ASSERT_NE(handle3, nullptr);
       ASSERT_TRUE(isConst(handle3->getMemory()));
       ASSERT_EQ(handle3.isWriteHandle(), false);
+    }
+
+    {
+      // test upgrade function with waitContext
+      ReadHandle handle = detail::createHandleWithWaitContextForTest<
+          typename AllocatorT::WriteHandle, AllocatorT>(alloc);
+      auto waitContext = detail::getWaitContextForTest(handle);
+      // This is like doing a "clone" and setting it into wait context
+      waitContext->set(alloc.find("key"));
+      auto handle2 = std::move(handle).toWriteHandle();
+      ASSERT_EQ(handle2.isWriteHandle(), true);
     }
   }
 
@@ -4013,6 +4023,79 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     EXPECT_EQ(1, stats.numReapedItems);
   }
 
+  void testReaperSkippingSlabConcurrentTraversal() {
+    // Testing if a reaper skips a slab correctly when the allocation class lock
+    // is held. The scenario here is that we have two threads traversing slabs
+    // concurrently.
+    const int numSlabs = 2;
+
+    typename AllocatorT::Config config;
+    // start with no reaper
+    config.reaperInterval = std::chrono::seconds(0);
+    config.setCacheSize(numSlabs * Slab::kSize);
+
+    AllocatorT allocator(config);
+    const size_t numBytes = allocator.getCacheMemoryStats().cacheSize;
+    auto poolId =
+        allocator.addPool("default", numBytes, std::set<uint32_t>{1000, 10000});
+    // Allocate 1 slab to the allocClass
+    util::allocateAccessible(allocator, poolId, "test", 5000, 1);
+
+    // Sleep for 2 seconds to ensure item has expired
+    std::this_thread::sleep_for(std::chrono::seconds{2});
+
+    // Start reaper
+    allocator.startNewReaper(std::chrono::milliseconds{1},
+                             util::Throttler::Config::makeNoThrottleConfig());
+    // Lock the allocClass for 2 ms so reaper will skip the slab the
+    // allocClass owns
+    allocator.traverseAndExpireItems(
+        [](void* /* unused */, AllocInfo /* unused */) {
+          std::this_thread::sleep_for(std::chrono::milliseconds{2});
+          return true;
+        });
+    // We should have at least one slab skipped since traverseAndExpireItems
+    // call will make the associated allocClass hold a lock for 2 ms. The
+    // reaper should be ran at least once within the 2 ms. If it ran more
+    // than once numSkippedSlabReleases could be larger than 1.
+    ASSERT_GE(allocator.getGlobalCacheStats().numSkippedSlabReleases, 1);
+  }
+
+  void testReaperSkippingSlabTraversalWhileSlabReleasing() {
+    // Testing if a reaper skips a slab correctly when the allocation class lock
+    // is held because one of the slabs is in the release process.
+    const int numSlabs = 2;
+
+    typename AllocatorT::Config config;
+    // start with no reaper
+    config.reaperInterval = std::chrono::seconds(0);
+    config.setCacheSize(numSlabs * Slab::kSize);
+
+    AllocatorT allocator(config);
+    const size_t numBytes = allocator.getCacheMemoryStats().cacheSize;
+    // We only need a single alloc class for this test
+    auto poolId =
+        allocator.addPool("default", numBytes, std::set<uint32_t>{64});
+
+    // allocate and hold this item handle to STALL slab release
+    auto it = util::allocateAccessible(allocator, poolId, "test", 0, 1);
+    std::thread t1([&allocator, poolId] {
+      allocator.releaseSlab(poolId, 0, Slab::kInvalidClassId,
+                            SlabReleaseMode::kRebalance);
+    });
+
+    // Make sure releaseSlab is executed
+    std::this_thread::sleep_for(std::chrono::seconds{2});
+
+    allocator.traverseAndExpireItems(
+        [](void* /* unused */, AllocInfo /* unused */) { return true; });
+
+    it.reset();
+    t1.join();
+    // Verify we have at least skipped one slab
+    ASSERT_GE(allocator.getGlobalCacheStats().numSkippedSlabReleases, 1);
+  }
+
   void testAllocSizes() {
     const int numSlabs = 2;
 
@@ -4240,7 +4323,8 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       ASSERT_EQ(3, stats.numActiveAllocs());
     }
 
-    // Remove the item, but this shouldn't free it since we still have a handle
+    // Remove the item, but this shouldn't free it since we still have a
+    // handle
     alloc.remove("hello");
 
     ASSERT_TRUE(removedKeys.empty());
@@ -4925,7 +5009,8 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     // Fisrt allocation class is the smallest allocation class
     alloc.releaseSlab(pid, 0, SlabReleaseMode::kRebalance);
 
-    // Now we should still see one and two, but three should be evicted already
+    // Now we should still see one and two, but three should be evicted
+    // already
     ASSERT_NE(nullptr, alloc.find("one"));
     ASSERT_NE(nullptr, alloc.find("two"));
     ASSERT_EQ(nullptr, alloc.find("three"));
@@ -5272,8 +5357,8 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       ASSERT_EQ(1, stats.numActiveAllocs());
     }
 
-    // Remove the item, but this shouldn't free it since we still have a handle
-    // Add it back
+    // Remove the item, but this shouldn't free it since we still have a
+    // handle Add it back
     auto chainedItemHandle4 = alloc.allocateChainedItem(itemHandle, size * 8);
     alloc.addChainedItem(itemHandle, std::move(chainedItemHandle4));
     alloc.remove("hello");
@@ -5594,8 +5679,8 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       alloc.addChainedItem(itemHandle, std::move(chainedItemHandle2));
       alloc.addChainedItem(itemHandle, std::move(chainedItemHandle3));
 
-      // Expect that all 3 chained items associated with itemHandle will be seen
-      // by removeCbNew
+      // Expect that all 3 chained items associated with itemHandle will be
+      // seen by removeCbNew
       alloc.remove(itemHandle.get()->getKey());
     } // scope for item handle to trigger remove CB
     ASSERT_TRUE(found);
@@ -5821,14 +5906,11 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       EXPECT_FALSE(util::isKeyValid(key));
       EXPECT_THROW(util::throwIfKeyInvalid(key), std::invalid_argument);
     }
+    // Note: we don't test for a null stringpiece with positive size as the
+    // key
+    //       because folly::StringPiece now throws an exception for it
     {
-      // 3) invalid due to folly::StringPiece being invalid
-      auto key = folly::StringPiece{nullptr, std::size_t{10}};
-      EXPECT_FALSE(util::isKeyValid(key));
-      EXPECT_THROW(util::throwIfKeyInvalid(key), std::invalid_argument);
-    }
-    {
-      // (2) and (3) invalid due to both length and start pointer
+      // 3) invalid due due a null key
       auto key = folly::StringPiece{nullptr, std::size_t{0}};
       EXPECT_FALSE(util::isKeyValid(key));
       EXPECT_THROW(util::throwIfKeyInvalid(key), std::invalid_argument);
@@ -6038,6 +6120,34 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       objcacheUnmarkNascent(handle);
     }
     EXPECT_EQ(true, isRemoveCbTriggered);
+  }
+
+  void testDelayWorkersStart() {
+    // Configure reaper and create an item with TTL
+    // Verify without explicitly starting workers, the item is not reaped
+    // And then verify after explicitly starting workers, the item is reaped
+    typename AllocatorT::Config config;
+    config.enableItemReaperInBackground(std::chrono::milliseconds{10})
+        .setDelayCacheWorkersStart();
+
+    AllocatorT alloc(config);
+    const size_t numBytes = alloc.getCacheMemoryStats().cacheSize;
+    auto poolId = alloc.addPool("default", numBytes);
+
+    {
+      auto handle = alloc.allocate(poolId, "test", 100, 2);
+      alloc.insertOrReplace(handle);
+    }
+
+    EXPECT_NE(nullptr, alloc.peek("test"));
+    std::this_thread::sleep_for(std::chrono::seconds{3});
+    // Still here because we haven't started the workers
+    EXPECT_NE(nullptr, alloc.peek("test"));
+
+    alloc.startCacheWorkers();
+    std::this_thread::sleep_for(std::chrono::seconds{1});
+    // Once reaper starts it will have expired this item quickly
+    EXPECT_EQ(nullptr, alloc.peek("test"));
   }
 };
 } // namespace tests
