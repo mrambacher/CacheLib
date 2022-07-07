@@ -23,12 +23,15 @@ namespace facebook {
 namespace cachelib {
 namespace objcache2 {
 
-template <typename CacheTrait>
+template <typename AllocatorT>
 class ObjectCacheBase : public CacheBase {
   // Get a string referring to the cache name for this cache
   const std::string getCacheName() const override {
     return l1Cache_->getCacheName();
   }
+
+  // Whether it is object-cache.
+  bool isObjectCache() const override { return true; }
 
   // Get the reference  to a memory pool, for stats purposes
   //
@@ -198,7 +201,7 @@ class ObjectCacheBase : public CacheBase {
     return 0;
   }
 
-  std::unique_ptr<CacheTrait> l1Cache_;
+  std::unique_ptr<AllocatorT> l1Cache_;
 };
 } // namespace objcache2
 } // namespace cachelib

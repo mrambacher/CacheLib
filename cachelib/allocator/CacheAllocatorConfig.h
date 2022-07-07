@@ -18,6 +18,7 @@
 
 #include <folly/Optional.h>
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <set>
@@ -27,6 +28,7 @@
 #include "cachelib/allocator/Cache.h"
 #include "cachelib/allocator/MM2Q.h"
 #include "cachelib/allocator/MemoryMonitor.h"
+#include "cachelib/allocator/MemoryTierCacheConfig.h"
 #include "cachelib/allocator/NvmAdmissionPolicy.h"
 #include "cachelib/allocator/PoolOptimizeStrategy.h"
 #include "cachelib/allocator/RebalanceStrategy.h"
@@ -50,6 +52,7 @@ class CacheAllocatorConfig {
   using NvmCacheDeviceEncryptor = typename CacheT::NvmCacheT::DeviceEncryptor;
   using MoveCb = typename CacheT::MoveCb;
   using NvmCacheConfig = typename CacheT::NvmCacheT::Config;
+  using MemoryTierConfigs = std::vector<MemoryTierCacheConfig>;
   using Key = typename CacheT::Key;
   using EventTrackerSharedPtr = std::shared_ptr<typename CacheT::EventTracker>;
   using Item = typename CacheT::Item;
@@ -199,6 +202,16 @@ class CacheAllocatorConfig {
   // cachePersistence()
   CacheAllocatorConfig& usePosixForShm();
 
+  // Configures cache memory tiers. Each tier represents a cache region inside
+  // byte-addressable memory such as DRAM, Pmem, CXLmem.
+  // Accepts vector of MemoryTierCacheConfig. Each vector element describes
+  // configuration for a single memory cache tier. Tier sizes are specified as
+  // ratios, the number of parts of total cache size each tier would occupy.
+  CacheAllocatorConfig& configureMemoryTiers(const MemoryTierConfigs& configs);
+
+  // Return reference to MemoryTierCacheConfigs.
+  const MemoryTierConfigs& getMemoryTierConfigs();
+
   // This turns on a background worker that periodically scans through the
   // access container and look for expired items and remove them.
   CacheAllocatorConfig& enableItemReaperInBackground(
@@ -259,7 +272,11 @@ class CacheAllocatorConfig {
       ChainedItemMovingSync sync = {},
       uint32_t movingAttemptsLimit = 10);
 
-  // This customizes how many items we try to evict before giving up.
+  // Specify a threshold for detecting slab release stuck
+  CacheAllocatorConfig& setSlabReleaseStuckThreashold(
+      std::chrono::milliseconds threshold);
+
+  // This customizes how many items we try to evict before giving up.s
   // We may fail to evict if someone else (another thread) is using an item.
   // Setting this to a high limit leads to a higher chance of successful
   // evictions but it can lead to higher allocation latency as well.
@@ -362,13 +379,20 @@ class CacheAllocatorConfig {
   bool validateStrategy(
       const std::shared_ptr<PoolOptimizeStrategy>& strategy) const;
 
+  // check that memory tier ratios are set properly
+  const CacheAllocatorConfig& validateMemoryTiers() const;
+
   // @return a map representation of the configs
   std::map<std::string, std::string> serialize() const;
+
+  // The max number of memory cache tiers
+  // TODO: increase this number when multi-tier configs are enabled
+  inline static const size_t kMaxCacheMemoryTiers = 1;
 
   // Cache name for users to indentify their own cache.
   std::string cacheName{""};
 
-  // Amount of memory for this cache instance
+  // Amount of memory for this cache instance (sum of all memory tiers' sizes)
   size_t size = 1 * 1024 * 1024 * 1024;
 
   // Directory for shared memory related metadata
@@ -432,6 +456,10 @@ class CacheAllocatorConfig {
   // rebalance to avoid alloc fialures.
   std::shared_ptr<RebalanceStrategy> defaultPoolRebalanceStrategy{
       new RebalanceStrategy{}};
+
+  // The slab release process is considered as being stuck if it does not
+  // make any progress for the below threshold
+  std::chrono::milliseconds slabReleaseStuckThreshold{std::chrono::seconds(60)};
 
   // time interval to sleep between iterations of pool size optimization,
   // for regular pools and compact caches
@@ -582,6 +610,10 @@ class CacheAllocatorConfig {
   std::string stringifyAddr(const void* addr) const;
   std::string stringifyRebalanceStrategy(
       const std::shared_ptr<RebalanceStrategy>& strategy) const;
+
+  // Configuration for memory tiers.
+  MemoryTierConfigs memoryTierConfigs{
+      {MemoryTierCacheConfig::fromShm().setRatio(1)}};
 
   // if turned on, cache allocator will not evict any item when the
   // system is out of memory. The user must free previously allocated
@@ -845,6 +877,28 @@ CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::enableItemReaperInBackground(
 }
 
 template <typename T>
+CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::configureMemoryTiers(
+    const MemoryTierConfigs& config) {
+  if (config.size() > kMaxCacheMemoryTiers) {
+    throw std::invalid_argument(folly::sformat(
+        "Too many memory tiers. The number of supported tiers is {}.",
+        kMaxCacheMemoryTiers));
+  }
+  if (!config.size()) {
+    throw std::invalid_argument(
+        "There must be at least one memory tier config.");
+  }
+  memoryTierConfigs = config;
+  return *this;
+}
+
+template <typename T>
+const typename CacheAllocatorConfig<T>::MemoryTierConfigs&
+CacheAllocatorConfig<T>::getMemoryTierConfigs() {
+  return memoryTierConfigs;
+}
+
+template <typename T>
 CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::disableCacheEviction() {
   disableEviction = true;
   return *this;
@@ -915,6 +969,13 @@ CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::enableMovingOnSlabRelease(
   moveCb = cb;
   movingSync = sync;
   movingTries = movingAttemptsLimit;
+  return *this;
+}
+
+template <typename T>
+CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::setSlabReleaseStuckThreashold(
+    std::chrono::milliseconds threshold) {
+  slabReleaseStuckThreshold = threshold;
   return *this;
 }
 
@@ -1001,7 +1062,8 @@ const CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::validate() const {
     throw std::invalid_argument(
         "It's not allowed to enable both RemoveCB and ItemDestructor.");
   }
-  return *this;
+
+  return validateMemoryTiers();
 }
 
 template <typename T>
@@ -1029,6 +1091,24 @@ bool CacheAllocatorConfig<T>::validateStrategy(
 }
 
 template <typename T>
+const CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::validateMemoryTiers()
+    const {
+  size_t parts = 0;
+  for (const auto& tierConfig : memoryTierConfigs) {
+    if (!tierConfig.getRatio()) {
+      throw std::invalid_argument("Tier ratio must be an integer number >=1.");
+    }
+    parts += tierConfig.getRatio();
+  }
+
+  if (parts > size) {
+    throw std::invalid_argument(
+        "Sum of tier ratios must be less than total cache size.");
+  }
+  return *this;
+}
+
+template <typename T>
 std::map<std::string, std::string> CacheAllocatorConfig<T>::serialize() const {
   std::map<std::string, std::string> configMap;
 
@@ -1052,6 +1132,8 @@ std::map<std::string, std::string> CacheAllocatorConfig<T>::serialize() const {
   configMap["poolResizeSlabsPerIter"] = std::to_string(poolResizeSlabsPerIter);
 
   configMap["poolRebalanceInterval"] = util::toString(poolRebalanceInterval);
+  configMap["slabReleaseStuckThreshold"] =
+      util::toString(slabReleaseStuckThreshold);
   configMap["trackTailHits"] = std::to_string(trackTailHits);
   // Stringify enum
   switch (memMonitorConfig.mode) {
@@ -1107,6 +1189,8 @@ std::map<std::string, std::string> CacheAllocatorConfig<T>::serialize() const {
       stringifyRebalanceStrategy(defaultPoolRebalanceStrategy);
   configMap["eventTracker"] = eventTracker ? "set" : "empty";
   configMap["nvmAdmissionMinTTL"] = std::to_string(nvmAdmissionMinTTL);
+  configMap["delayCacheWorkersStart"] =
+      delayCacheWorkersStart ? "true" : "false";
   mergeWithPrefix(configMap, throttleConfig.serialize(), "throttleConfig");
   mergeWithPrefix(configMap,
                   chainedItemAccessConfig.serialize(),

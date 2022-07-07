@@ -43,8 +43,8 @@
 namespace facebook {
 namespace cachelib {
 namespace detail {
-template <typename ItemHandle2>
-void objcacheUnmarkNascent(const ItemHandle2& hdl) {
+template <typename HandleT>
+void objcacheUnmarkNascent(const HandleT& hdl) {
   hdl.unmarkNascent();
 }
 
@@ -1125,7 +1125,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     const unsigned int keyLen = 100;
     const auto sizes = this->getValidAllocSizes(alloc, poolId, nSizes, keyLen);
 
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::WriteHandle> handles;
     size_t nHandles = 30;
     // make some allocations and hold the references to them.
     while (handles.size() != nHandles) {
@@ -2589,7 +2589,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     // parent of different size
     auto newParent = alloc.allocate(poolId, "parent", 1000);
 
-    typename AllocatorT::ItemHandle invalidParent = {};
+    typename AllocatorT::WriteHandle invalidParent = {};
     ASSERT_THROW(alloc.transferChainAndReplace(invalidParent, newParent),
                  std::invalid_argument);
 
@@ -2713,7 +2713,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
   //       while an async get is in-flight. Instead, we explicitly
   //       create a waitcontext in this test and act as if we're populating
   //       it from NvmCache. This test should be kept in-sync with how
-  //       create ItemHandle from NvmCache to ensure the behavior stays
+  //       create WriteHandle from NvmCache to ensure the behavior stays
   //       consistent.
   void testHandleTrackingAsync() {
     typename AllocatorT::Config config{};
@@ -2733,7 +2733,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     // Test waiting for a handle
     {
       auto hdl = detail::createHandleWithWaitContextForTest<
-          typename AllocatorT::ItemHandle, AllocatorT>(alloc);
+          typename AllocatorT::WriteHandle, AllocatorT>(alloc);
       auto waitContext = detail::getWaitContextForTest(hdl);
       ASSERT_EQ(0, alloc.getNumActiveHandles());
       ASSERT_EQ(0, alloc.getHandleCountForThread());
@@ -2751,7 +2751,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     // Test converting to SemiFuture
     {
       auto hdl = detail::createHandleWithWaitContextForTest<
-          typename AllocatorT::ItemHandle, AllocatorT>(alloc);
+          typename AllocatorT::WriteHandle, AllocatorT>(alloc);
 
       auto waitContext = detail::getWaitContextForTest(hdl);
       ASSERT_EQ(0, alloc.getNumActiveHandles());
@@ -2783,7 +2783,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     util::allocateAccessible(alloc, poolId, key, itemSize);
 
     // exhaust the handles.
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::ReadHandle> handles;
 
     try {
       while (true) {
@@ -3235,7 +3235,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     const unsigned int keyLen = 100;
     const uint32_t itemSize = 100;
 
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::WriteHandle> handles;
     for (unsigned int i = 0; i < 10000; ++i) {
       const auto key = this->getRandomNewKey(alloc, keyLen);
       auto handle = util::allocateAccessible(alloc, poolId, key, itemSize);
@@ -3851,7 +3851,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     // to make sure we skip reaping elements when application is using them
     // grab a handle to one of the elements and check that it is not reaped as
     // long as we are holding the handle.
-    typename AllocatorT::ItemHandle randomKeyHdl;
+    typename AllocatorT::WriteHandle randomKeyHdl;
 
     const uint32_t randomKey = folly::Random::rand32(0, numItems - 1);
 
@@ -3978,7 +3978,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
                                             1 /* ttl seconds */);
     ASSERT_NE(nullptr, largeIt);
 
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::WriteHandle> handles;
     for (int i = 0;; ++i) {
       auto it = util::allocateAccessible(allocator, poolId,
                                          folly::to<std::string>(i), 0);
@@ -4142,7 +4142,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     auto pid = allocator.addPool("default", numBytes, {small + 128, big + 128});
 
     // Allocate all memory to small AC
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::WriteHandle> handles;
     for (unsigned int i = 0;; ++i) {
       auto key = "small_key_" + folly::to<std::string>(i);
       auto handle = allocator.allocate(pid, key, small);
@@ -4865,7 +4865,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
           const auto key = keyPrefix + folly::to<std::string>(loop) + "_" +
                            folly::to<std::string>(i);
 
-          typename AllocatorT::ItemHandle itemHandle;
+          typename AllocatorT::WriteHandle itemHandle;
 
           itemHandle = alloc.allocate(pid, key, sizes[0]);
 
@@ -5930,7 +5930,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
                       {smallSize + 100, largeSize + 100});
 
     // Allocate until the smaller objects fill up the cache
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::WriteHandle> handles;
     for (int i = 0;; i++) {
       auto handle = util::allocateAccessible(
           alloc, poolId, folly::sformat("small_{}", i), smallSize);
@@ -5970,7 +5970,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
                       {smallSize + 100, largeSize + 100});
     // Allocate until the smaller objects fill up the cache
     // keeps handles in the vector to avoid eviction
-    std::vector<typename AllocatorT::ItemHandle> handles;
+    std::vector<typename AllocatorT::WriteHandle> handles;
     for (int i = 0;; i++) {
       auto handle = util::allocateAccessible(
           alloc, poolId, folly::sformat("small_{}", i), smallSize);
@@ -6148,6 +6148,71 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     std::this_thread::sleep_for(std::chrono::seconds{1});
     // Once reaper starts it will have expired this item quickly
     EXPECT_EQ(nullptr, alloc.peek("test"));
+  }
+
+  // Test to validate the logic to detect/export the slab release stuck.
+  // To do so, allocate two items and intentionally hold references
+  // while checking the stuck counter.
+  void testSlabReleaseStuck() {
+    const unsigned int releaseStuckThreshold = 10;
+    typename AllocatorT::Config config{};
+    config.setCacheSize(3 * Slab::kSize);
+    config.setSlabReleaseStuckThreashold(
+        std::chrono::seconds(releaseStuckThreshold));
+    AllocatorT alloc(config);
+    const size_t numBytes = alloc.getCacheMemoryStats().cacheSize;
+    auto poolId = alloc.addPool("foobar", numBytes);
+
+    // 3/4 * kSize to make sure items are allocated in different slabs
+    std::vector<uint32_t> sizes = {Slab::kSize * 3 / 4};
+
+    // Allocate two items to be used for tests
+    auto handle1 = util::allocateAccessible(alloc, poolId, "key1", sizes[0]);
+    ASSERT_NE(nullptr, handle1);
+
+    auto handle2 = util::allocateAccessible(alloc, poolId, "key2", sizes[0]);
+    ASSERT_NE(nullptr, handle2);
+
+    const uint8_t classId = alloc.getAllocInfo(handle1->getMemory()).classId;
+    ASSERT_EQ(classId, alloc.getAllocInfo(handle2->getMemory()).classId);
+
+    // Assert that numSlabReleaseStuck is not set
+    ASSERT_EQ(0, alloc.getSlabReleaseStats().numSlabReleaseStuck);
+
+    // Trying to remove the slab where the item is allocated. Thus, the release
+    // will be stuck until the reference is dropped below.
+    auto r1 = std::async(std::launch::async, [&] {
+      alloc.releaseSlab(poolId, classId, SlabReleaseMode::kResize,
+                        handle1->getMemory());
+      ASSERT_EQ(nullptr, handle1);
+    });
+
+    // Sleep for 2 + <releaseStuckThreshold> seconds; 2 seconds is an arbitrary
+    // margin to allow the release is detected as being stuck after
+    // <releaseStuckThreshold> seconds.
+    /* sleep override */ sleep(2 + releaseStuckThreshold);
+
+    ASSERT_EQ(1, alloc.getSlabReleaseStats().numSlabReleaseStuck);
+
+    // Do the same for another item
+    auto r2 = std::async(std::launch::async, [&] {
+      alloc.releaseSlab(poolId, classId, SlabReleaseMode::kResize,
+                        handle2->getMemory());
+      ASSERT_EQ(nullptr, handle2);
+    });
+
+    /* sleep override */ sleep(2 + releaseStuckThreshold);
+
+    ASSERT_EQ(2, alloc.getSlabReleaseStats().numSlabReleaseStuck);
+
+    // Now, release handles so the releaseSlab can proceed
+    handle1.reset();
+    r1.wait();
+    ASSERT_EQ(1, alloc.getSlabReleaseStats().numSlabReleaseStuck);
+
+    handle2.reset();
+    r2.wait();
+    ASSERT_EQ(0, alloc.getSlabReleaseStats().numSlabReleaseStuck);
   }
 };
 } // namespace tests

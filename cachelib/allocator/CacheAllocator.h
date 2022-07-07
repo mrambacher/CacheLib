@@ -488,6 +488,22 @@ class CacheAllocator : public CacheBase {
   //                  key does not exist.
   ReadHandle find(Key key);
 
+  // Warning: this API is synchronous today with HybridCache. This means as
+  //          opposed to find(), we will block on an item being read from
+  //          flash until it is loaded into DRAM-cache. In find(), if an item
+  //          is missing in dram, we will return a "not-ready" handle and
+  //          user can choose to block or convert to folly::SemiFuture and
+  //          process the item only when it becomes ready (loaded into DRAM).
+  //          If blocking behavior is NOT what you want, a workaround is:
+  //            auto readHandle = cache->find("my key");
+  //            if (!readHandle.isReady()) {
+  //              auto sf = std::move(readHandle)
+  //                .toSemiFuture()
+  //                .defer([] (auto readHandle)) {
+  //                  return std::move(readHandle).toWriteHandle();
+  //                }
+  //            }
+  //
   // look up an item by its key across the nvm cache as well if enabled. Users
   // should call this API only when they are going to mutate the item data.
   //
@@ -1083,6 +1099,9 @@ class CacheAllocator : public CacheBase {
   // get cache name
   const std::string getCacheName() const override final;
 
+  // whether it is object-cache
+  bool isObjectCache() const override final { return false; }
+
   // pool stats by pool id
   PoolStats getPoolStats(PoolId pid) const override final;
 
@@ -1239,6 +1258,14 @@ class CacheAllocator : public CacheBase {
   // drops the refcount and if needed, frees the allocation back to the memory
   // allocator and executes the necessary callbacks. no-op if it is nullptr.
   FOLLY_ALWAYS_INLINE void release(Item* it, bool isNascent);
+
+  // Differtiate different memory setting for the initialization
+  enum class InitMemType { kNone, kMemNew, kMemAttach };
+  // instantiates a cache allocator for common initialization
+  //
+  // @param types         the type of the memory used
+  // @param config        the configuration for the whole cache allocator
+  CacheAllocator(InitMemType types, Config config);
 
   // This is the last step in item release. We also use this for the eviction
   // scenario where we have to do everything, but not release the allocation
@@ -1615,14 +1642,6 @@ class CacheAllocator : public CacheBase {
       Deserializer& deserializer,
       const typename Item::PtrCompressor& compressor);
 
-  // Create a copy of empty MMContainers according to the configs of
-  // mmContainers_ This function is used when serilizing for persistence for the
-  // reason of backward compatibility. A copy of empty MMContainers from
-  // mmContainers_ will be created and serialized as unevictable mm containers
-  // and written to metadata so that previous CacheLib versions can restore from
-  // such a serialization. This function will be removed in the next version.
-  MMContainers createEmptyMMContainers();
-
   unsigned int reclaimSlabs(PoolId id, size_t numSlabs) final {
     return allocator_->reclaimSlabsAndGrow(id, numSlabs);
   }
@@ -1842,6 +1861,19 @@ class CacheAllocator : public CacheBase {
   void initNvmCache(bool dramCacheAttached);
   void initWorkers();
 
+  // @param type        the type of initialization
+  // @return nullptr if the type is invalid
+  // @return pointer to memory allocator
+  // @throw std::runtime_error if type is invalid
+  std::unique_ptr<MemoryAllocator> initAllocator(InitMemType type);
+  // @param type        the type of initialization
+  // @return nullptr if the type is invalid
+  // @return pointer to access container
+  // @throw std::runtime_error if type is invalid
+  std::unique_ptr<AccessContainer> initAccessContainer(InitMemType type,
+                                                       const std::string name,
+                                                       AccessConfig config);
+
   std::optional<bool> saveNvmCache();
   void saveRamCache();
 
@@ -2030,6 +2062,7 @@ class CacheAllocator : public CacheBase {
 
   // tests
   friend class facebook::cachelib::tests::NvmCacheTest;
+  FRIEND_TEST(CachelibAdminTest, WorkingSetAnalysisLoggingTest);
   template <typename AllocatorT>
   friend class facebook::cachelib::tests::BaseAllocatorTest;
   template <typename AllocatorT>
